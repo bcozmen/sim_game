@@ -34,7 +34,10 @@ def compute_on_gpu(func):
     @wraps(func)
     def wrapper(x, *args, **kwargs):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        x      = torch.from_numpy(x).to(device)
+        #if not torch tensor, convert to tensor and move to device
+        if not isinstance(x, torch.Tensor):
+            x = torch.from_numpy(x)
+        x = x.to(device)
         result = func(x, *args, **kwargs)
         if isinstance(result, torch.Tensor):
             return result.cpu().numpy()
@@ -42,8 +45,10 @@ def compute_on_gpu(func):
         return (tensor.cpu().numpy(), *rest)
     return wrapper
 
-
+@compute_on_gpu
 def masked_avg(array, mask, radius):
+    if not isinstance(mask, torch.Tensor):
+        mask = torch.from_numpy(mask)
     mask = mask.to(array.device, dtype=array.dtype)
 
     # Ensure 4D: (N, C, H, W)
@@ -72,20 +77,7 @@ def masked_avg(array, mask, radius):
 
 
 @compute_on_gpu
-def binary_dilation(x, k=3, iterations=1):
-    """
-    GPU binary dilation using max pooling.
-
-    Args:
-        x: numpy array (2D or 3D)
-        k: kernel size (odd)
-        iterations: number of dilation steps
-
-    Returns:
-        numpy array (same 2D shape as input)
-    """
-
-   
+def binary_dilation(x, k=3, iterations=1):   
     # ensure shape (1,1,H,W)
     if x.dim() == 2:
         x = x.unsqueeze(0).unsqueeze(0)
@@ -96,6 +88,23 @@ def binary_dilation(x, k=3, iterations=1):
 
     for _ in range(iterations):
         x = F.max_pool2d(x, kernel_size=k, stride=1, padding=k // 2)
+
+    x = (x > 0)
+
+    return x.squeeze()
+
+@compute_on_gpu
+def binary_erosion(x, k=3, iterations=1):
+    # ensure shape (1,1,H,W)
+    if x.dim() == 2:
+        x = x.unsqueeze(0).unsqueeze(0)
+    elif x.dim() == 3:
+        x = x.unsqueeze(1)
+
+    x = x.float()
+
+    for _ in range(iterations):
+        x = -F.max_pool2d(-x, kernel_size=k, stride=1, padding=k // 2)
 
     x = (x > 0)
 

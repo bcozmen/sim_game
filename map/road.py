@@ -8,9 +8,9 @@ from .gpu_helpers import timer, astar
 BASE_COST        = 10.0
 RIVER_COST       = 20.0
 MOUNTAIN_THRESH  = 0.75
-MOUNTAIN_SLOPE   = 100.0
+MOUNTAIN_SLOPE   = 1000.0
 ROAD_COST_FACTOR = 0.1   # existing-road discount applied during iterative build
-EXTRA_EDGE_RATIO = 0.4   # fraction of non-MST Delaunay edges added for loops
+EXTRA_EDGE_RATIO = 0.5   # fraction of non-MST Delaunay edges added for loops
 
 
 class Road:
@@ -44,8 +44,8 @@ class Road:
         cost_map[sea_mask]   = np.inf
         cost_map[river_mask] = RIVER_COST
 
-        high = height_map > MOUNTAIN_THRESH
-        cost_map[high] = RIVER_COST + MOUNTAIN_SLOPE * (height_map[high] - MOUNTAIN_THRESH)
+        #high = height_map > MOUNTAIN_THRESH
+        #cost_map[high] = RIVER_COST + MOUNTAIN_SLOPE * (height_map[high] - MOUNTAIN_THRESH)
 
         return cost_map
 

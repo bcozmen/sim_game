@@ -11,3 +11,4 @@ __pycache__/
 # Ignore .pt and .pth files (PyTorch model files)
 *.pt
 *.pth
+*.pickle

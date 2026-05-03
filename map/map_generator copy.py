@@ -16,27 +16,19 @@ class MapGenerator:
         self.max_altitude = max_altitude
     def generate(self):
         height_map = self.generate_height_map()
+        #cut height map 2nd dimention to 3/4 to make it more rectangular
         sea_mask, height_map = self.generate_sea_mask(height_map)
         river_mask = self.generate_rivers(height_map, sea_mask)
+        river_mask = binary_dilation(river_mask, iterations=2)  # dilate rivers to make them wider
+        fertility_map = self.generate_fertility_map(height_map, sea_mask, river_mask)
+        forest_map = self.generate_forest_map(height_map, fertility_map, sea_mask, river_mask)
+        humidity_map = self.generate_humidity_map(height_map, sea_mask, river_mask)
         slope_map = self.generate_slope_map(height_map)
 
-
-        humidity_map = self.generate_humidity_map(height_map, sea_mask, river_mask)
-
-        fertility_map = self.generate_fertility_map(height_map, humidity_map, slope_map)
-        forest_map = self.generate_forest_map(height_map, fertility_map, sea_mask, river_mask)
-        husbandry_map = self.generate_husbandry_map(height_map, humidity_map)
-
-        habitability_map = self.generate_habitability_map(slope_map)
-        
-        
-
         info = np.array([self.cell_size, self.max_altitude, self.sea_level], dtype=np.float32)
-        maps = (height_map, sea_mask, river_mask, fertility_map, forest_map, humidity_map, slope_map, husbandry_map, habitability_map, info)
-        keys = ["height", "sea", "river", "fertility", "forest", "humidity", "slope", "husbandry", "habitability", "info"]
+        maps = (height_map, sea_mask, river_mask, fertility_map, forest_map, humidity_map, slope_map, info)
+        keys = ["height", "sea", "river", "fertility", "forest", "humidity", "slope", "info"]
         return keys, maps
-
-
     @timer
     def generate_height_map(self):
         assert (self.size - 1) & (self.size - 2) == 0, "size must be 2^n + 1"
@@ -87,6 +79,19 @@ class MapGenerator:
         grid = (grid - grid.min()) / (grid.max() - grid.min() + 1e-5)  # normalize to [0, 1]
         return grid
 
+    def generate_humidity_map(self, height_map, sea_mask, river_mask):
+        #humidity is higher near water and in low altitudes
+        humidity = np.zeros_like(height_map, dtype=np.float32)
+
+        #proximity to water (sea or river)
+        water_mask = sea_mask | river_mask
+        water_distance = distance_transform_edt(~water_mask)
+        
+        #normalize distance to water and invert so closer to water is higher humidity
+        humidity = 1 - (water_distance / np.max(water_distance))
+        humidity[water_mask] = 0  # water cells have max humidity
+        return humidity
+    
     def generate_sea_mask(self, height_map):
         #calculate sea level as the 30th percentile of height values
         sea_level = np.percentile(height_map, 30)
@@ -94,16 +99,80 @@ class MapGenerator:
         
 
         #erase small land patches in the sea and small sea patches in the land by dilation and erosion
-        sea_mask = binary_dilation(sea_mask, iterations=4)
-        sea_mask = binary_erosion(sea_mask, iterations=4)
+        sea_mask = binary_dilation(sea_mask, iterations=2)
+        sea_mask = binary_erosion(sea_mask, iterations=2)
 
         height_map = height_map - sea_level  # adjust height map so sea level is at 0
         height_map[sea_mask] = 0  # set sea cells to exactly 0 height
         self.sea_level = 0  # store for later use in fertility and forest maps
         return sea_mask, height_map
-    
-    
+
+    def _get_river_sources(self, height_map, land_mask):
+        # get the top 15% highest land points and randomly pick river_count of them
+        land_heights = height_map[land_mask]
+        threshold = np.percentile(land_heights, 85)
+
+        # np.where returns index arrays directly — faster than argwhere (no stacking)
+        xs, ys = np.where((height_map >= threshold) & land_mask)
+
+        # randomly sample without shuffling the whole array
+        n = len(xs)
+        k = min(self.river_count, n)
+        chosen = np.random.choice(n, size=k, replace=False)
+        sources = list(zip(xs[chosen].tolist(), ys[chosen].tolist()))
+        return sources
+
+    def _dilate_rivers(self, river_count):
+        h, w = river_count.shape
+        max_count = int(river_count.max())
+        dilated = np.zeros((h, w), dtype=bool)
+        for level in range(1, max_count + 1):
+            # Every cell carrying at least `level` rivers contributes a dilation of `level` iterations
+            mask = river_count >= level
+            dilated |= binary_dilation(mask, iterations=level)
+        return dilated
+
+    def _dilate_all_rivers(self, river_mask):
+        dilated = binary_dilation(river_mask, iterations=2)  # fixed dilation for all rivers
+        return dilated
+
+    def generate_slope_map(self, height_map):
+        dz, dx = np.gradient(height_map)
+        slope = np.sqrt(dz**2 + dx**2)
+        #slope = (slope - slope.min()) / (slope.max() - slope.min() + 1e-5)  # normalize to [0, 1]
+        return slope
+
+    def generate_fertility_map(self, height_map, sea_mask, river_mask):
+        river_effect = np.zeros_like(height_map, dtype=np.float32)
+
+        #Give a boost to fertility based on proximity to rivers
         
+        river_distance = distance_transform_edt(~river_mask)
+        river_effect += np.exp(-river_distance / self.size)  # decay with distance
+
+        #normalize fertility to [0, 1]
+        river_effect = (river_effect - river_effect.min()) / (river_effect.max() - river_effect.min() + 1e-5)
+
+        # Apply altitude effect: boost fertility at low to mid altitudes, reduce at high altitudes
+        altitude = np.clip(height_map - self.sea_level, 0, 1)
+        altitude_effect = (1 - altitude) ** 3  # quadratic boost for low altitudes, drops off at high altitudes
+        river_effect *= altitude_effect
+
+        #normalize again after altitude effect
+        river_effect[sea_mask | river_mask] = 0  # sea and river have zero fertility
+        river_effect = (river_effect - river_effect.min()) / (river_effect.max() - river_effect.min() + 1e-5)
+
+        fertility_map = river_effect
+        return fertility_map
+
+    def generate_forest_map(self, height_map, fertility_map, sea_mask, river_mask):
+        height = np.clip(height_map - self.sea_level, 0, 1)
+        altitude_effect = np.exp(height)  # exponential boost for higher altitudes
+        normalized_altitude_effect = (altitude_effect - altitude_effect.min()) / (altitude_effect.max() - altitude_effect.min() + 1e-5)
+
+        forest_map = normalized_altitude_effect + normalized_altitude_effect * fertility_map
+        forest_map = (forest_map - forest_map.min()) / (forest_map.max() - forest_map.min() + 1e-5)
+        return forest_map
     @timer
     def generate_rivers(self, height_map, sea_mask):
         sources = self._get_river_sources(height_map, ~sea_mask)
@@ -118,7 +187,6 @@ class MapGenerator:
                 river_count = result
 
         river_mask = self._dilate_rivers(river_count)
-        river_mask = binary_dilation(river_mask, iterations=2)  # make rivers wider for better visibility and fertility effect
         return river_mask
         
     def _trace_river(self, start_x, start_y, height_map, sea_mask, river_count):
@@ -147,76 +215,4 @@ class MapGenerator:
             river_count[x, y] += 1
 
         return river_count
-
-    def _get_river_sources(self, height_map, land_mask):
-        # get the top 15% highest land points and randomly pick river_count of them
-        land_heights = height_map[land_mask]
-        threshold = np.percentile(land_heights, 85)
-
-        # np.where returns index arrays directly — faster than argwhere (no stacking)
-        xs, ys = np.where((height_map >= threshold) & land_mask)
-
-        # randomly sample without shuffling the whole array
-        n = len(xs)
-        k = min(self.river_count, n)
-        chosen = np.random.choice(n, size=k, replace=False)
-        sources = list(zip(xs[chosen].tolist(), ys[chosen].tolist()))
-        return sources
-
-    def _dilate_rivers(self, river_count):
-        h, w = river_count.shape
-        max_count = int(river_count.max())
-        dilated = np.zeros((h, w), dtype=bool)
-        for level in range(1, max_count + 1):
-            # Every cell carrying at least `level` rivers contributes a dilation of `level` iterations
-            mask = river_count >= level
-            dilated |= binary_dilation(mask, iterations=level)
-        return dilated
-
-    def generate_slope_map(self, height_map):
-        dz, dx = np.gradient(height_map)
-        slope = np.sqrt(dz**2 + dx**2)
-        return slope
-
-    def generate_humidity_map(self, height_map, sea_mask, river_mask):
-        #humidity is higher near water and in low altitudes
-        humidity = np.zeros_like(height_map, dtype=np.float32)
-
-        #proximity to water (sea or river)
-        water_mask = sea_mask | river_mask
-        water_distance = distance_transform_edt(~water_mask)
-        
-        #normalize distance to water and invert so closer to water is higher humidity
-        humidity = 1 - (water_distance / np.max(water_distance))
-        humidity[water_mask] = 0  # water cells have max humidity
-        humidity = humidity ** 0.4
-        return humidity
-
-    def generate_fertility_map(self, height_map, humidity_map, slope_map):
-        slope = slope_map
-        slope[slope < 0.0005] = 0 
-        slope = 1 / np.exp(slope * 100)  # steep slopes have much lower fertility, gentle slopes are close to 1
-        fertility = (humidity_map) * (1 - (height_map ** 1.5)) * slope  # combine humidity, altitude, and slope effects 
-        fertility = (fertility - fertility.min()) / (fertility.max() - fertility.min() + 1e-5)  # normalize to [0, 1]
-        return fertility
-
-    def generate_forest_map(self, height_map, fertility_map, sea_mask, river_mask):
-        height = np.clip(height_map - self.sea_level, 0, 1)
-        altitude_effect = np.exp(height)  # exponential boost for higher altitudes
-        normalized_altitude_effect = (altitude_effect - altitude_effect.min()) / (altitude_effect.max() - altitude_effect.min() + 1e-5)
-
-        forest_map = normalized_altitude_effect * (1 + fertility_map)
-        forest_map = (forest_map - forest_map.min()) / (forest_map.max() - forest_map.min() + 1e-5)
-        return forest_map
-
-    def generate_husbandry_map(self, height_map, humidity_map):
-        husbandry = (humidity_map) * ((1 - height_map ) ** 0.25)  # husbandry is better in humid and low altitude areas
-        husbandry = (husbandry - husbandry.min()) / (husbandry.max() - husbandry.min() + 1e-5)
-        return husbandry
     
-    def generate_habitability_map(self, slope_map):
-        slope = slope_map
-        slope[slope < 0.001] = 0 
-        habitability = 1 / np.exp(slope * 1000)  # steep slopes are much less habitable, gentle slopes are close to 1
-        habitability = (habitability - habitability.min()) / (habitability.max() - habitability.min() + 1e-5)  # normalize to [0, 1]
-        return habitability

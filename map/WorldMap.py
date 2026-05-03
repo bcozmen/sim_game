@@ -7,6 +7,8 @@ from .map_generator import MapGenerator
 from .land import City
 from .road import Road
 
+import pickle
+
 
 
 map_generator_params = {
@@ -19,11 +21,11 @@ map_generator_params = {
 
 type_to_cmap = {
     "height": "terrain",
-    "sea": "Blues",
-    "river": "Blues",
     "fertility": "YlGn",
     "forest": "Greens",
-    "humidity": "PuBuGn"
+    "humidity": "PuBuGn",
+    "husbandry": "Oranges",
+    "habitability": "coolwarm"
 }
 
 city_params = {
@@ -46,8 +48,8 @@ class WorldMap:
         self.maps = None
         if filename:
             if filename == True:
-                filename = "maps.pt"
-            self.load_maps(filename)
+                filename = "maps.pickle"
+            self.load(filename)
         else:
             self.init()
 
@@ -104,7 +106,7 @@ class WorldMap:
 
             #make radius 200 around the city uninhabitable for other cities
             y, x = np.ogrid[:fertility.shape[0], :fertility.shape[1]]
-            mask = (x - city_index[1]) ** 2 + (y - city_index[0]) ** 2 <= city.max_radius ** 2
+            mask = (x - city_index[1]) ** 2 + (y - city_index[0]) ** 2 <= (city.max_radius * 4) ** 2
             fertility[mask] = 0
         return cities
 
@@ -117,51 +119,104 @@ class WorldMap:
     def convert_to_torch(self, keys, maps):
         #return a dict of torch tensors with keys "height", "sea", "river", "fertility", "forest", "humidity"
         return {key: torch.from_numpy(maps[i]) for i, key in enumerate(keys)}
+    
+    def plot_all(self):
+        fig, axs = plt.subplots(3, 2, figsize=(20, 15))
+        keys = ["height", "fertility", "forest", "humidity", "husbandry" ,"habitability"]
+        for ax, key in zip(axs.flatten(), keys):
+            self.plot_map(ax, key,title=key.capitalize())
+        plt.tight_layout()
+        plt.show()
+    def plot(self, map_type = "height", ax = None, show = True):
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(13, 13))
+        self.plot_map(ax, map_type)
 
-    def plot_maps(self, map_type = "height"):
-        H, W = self.maps["height"].shape
-        
-        fig, ax = plt.subplots(figsize=(10, 10))    
+        if show:
+            plt.show()
 
+    def plot_map(self, ax, map_type = "height", title = None):
         this_map = self.maps[map_type].cpu().numpy()
+        vmin, vmax = 0, 1
+        if map_type == "height":
+            vmin, vmax = -0.2, 1
+
+        #add colorbar per axis
+        ax.imshow(this_map, cmap=type_to_cmap.get(map_type, "viridis"), vmin=vmin, vmax=vmax)
+        plt.colorbar(ax.imshow(this_map, cmap=type_to_cmap.get(map_type, "viridis"), vmin=vmin, vmax=vmax), ax=ax)
+        ax.set_title(title if title else f"{map_type.capitalize()} Map")
+       
+       
+        overlay = self.get_overlay(color=(0.0, 0.0, 0.0))  # Semi-transparent blue for sea and river
+        overlay = self._plot_sea_and_river_overlay(overlay)
+        
+        if "road" in self.maps:
+            overlay = self._plot_roads(overlay)
+        overlay = self._plot_cities(overlay)
+        ax.imshow(overlay)
+
+    def _plot_sea_and_river_overlay(self, overlay):
         sea = self.maps["sea"].cpu().numpy()
         river = self.maps["river"].cpu().numpy()
+        H, W = sea.shape
 
-        plt.imshow(this_map, cmap=type_to_cmap.get(map_type, "viridis"))
-        plt.title(f"{map_type.capitalize()} Map")
-        # Add colorbar for reference
-        plt.colorbar()
 
-        # Create sea and river overlays
-        overlay = torch.zeros((H, W, 4), dtype=torch.float32)  # RGBA overlay
-        #make a nice blue
-        overlay[:, :, 0] = 0.0  # Red channel
-        overlay[:, :, 1] = 0.0  # Green channel
-        overlay[:, :, 2] = 1.0  # Blue channel
-        overlay[:, :, 3] = 0.0  # Alpha channel (transparency
 
         # sea mask
         sea_mask = np.logical_or(sea, river)
-        overlay[sea_mask, 3] = 1.0  # Semi-transparent blue for sea and river
-        plt.imshow(overlay)
-
-        # Plot cities as red dots
+        overlay = self.mask_overlay(overlay, sea_mask, color=(0.0, 0.5, 1.0), alpha=0.9)  # Semi-transparent blue for sea and river
+        return overlay
+    def _plot_cities(self, overlay):
+        H, W = self.maps["height"].shape
         for city in self.cities:
-            plt.scatter(city.pos[1], city.pos[0], color='red', label='City Center')
-
-        # plot roads as grey lines
-        if "road" in self.maps:
-            road_mask = self.maps["road"].cpu().numpy()
-            overlay = np.zeros((H, W, 4), dtype=np.float32)  # RGBA overlay for roads
-            overlay[road_mask, :3] = 0.5  # Grey color for roads
-            overlay[road_mask, 3] = 1.0  # Fully opaque
-            plt.imshow(overlay)
-
-        plt.show()
+            #overlay yellow for rural
+            
+            city_mask = (self.maps["city"][:, :, 0] == city.id)
+            overlay = self.mask_overlay(overlay, city_mask, color=(1.0, 1.0, 0.0), alpha=0.5)  # Semi-transparent yellow for cities
+        return overlay
 
 
-    def save_maps(self, filename = "maps.pt"):
-        torch.save(self.maps, filename)
+    def _plot_roads(self, overlay):
+        road_mask = self.maps["road"].cpu().numpy()
+        H, W = road_mask.shape
+        overlay = self.mask_overlay(overlay, road_mask, color=(0.5, 0.5, 0.5), alpha=1.0)  # Grey color for roads
+        return overlay
     
-    def load_maps(self, filename = "maps.pt"):
-        self.maps = torch.load(filename)
+    def get_overlay(self, color = (1.0, 1.0, 0.0)):
+        H, W = self.maps["height"].shape
+        overlay = np.zeros((H, W, 4), dtype=np.float32)  # RGBA overlay
+        overlay[:, :, 0] = color[0]
+        overlay[:, :, 1] = color[1]
+        overlay[:, :, 2] = color[2]
+        return overlay
+
+    def mask_overlay(self, overlay, mask, color = (1.0, 1.0, 0.0), alpha = 1.0):
+        overlay[mask, 0] = color[0]
+        overlay[mask, 1] = color[1]
+        overlay[mask, 2] = color[2]
+        overlay[mask, 3] = alpha
+        return overlay
+
+
+    def save(self, filename = "maps.pickle"):
+        #save cities and maps
+        with open(filename, "wb") as f:
+            pickle.dump({
+                "maps": self.maps,
+                "cities": self.cities,
+                "road": self.road,
+            }, f)
+    
+    def load(self, filename = "maps.pickle"):
+        with open(filename, "rb") as f:
+            data = pickle.load(f)
+            self.maps = data["maps"]
+            self.cities = data["cities"]
+            self.road = data.get("road", None)
+            # Reassign each city's maps reference to the shared maps dict,
+            # since pickle restores them as independent copies.
+            for city in self.cities:
+                city.maps = self.maps
+                city.max_radius = self.city_params.get("max_radius", city.max_radius)
+                city.growth_factor = self.city_params.get("growth_factor", city.growth_factor)
+                city.max_road_radius = self.city_params.get("max_road_radius", getattr(city, "max_road_radius", 50))
