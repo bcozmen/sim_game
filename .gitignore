@@ -1,0 +1,13 @@
+# Ignore all Python bytecode files
+*.pyc
+*.pyo
+__pycache__/
+*__pycache__/
+
+# Ignore notebook checkpoints
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Ignore .pt and .pth files (PyTorch model files)
+*.pt
+*.pth
