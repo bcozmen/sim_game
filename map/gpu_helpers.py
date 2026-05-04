@@ -110,6 +110,9 @@ def binary_erosion(x, k=3, iterations=1):
 
     return x.squeeze()
 
+
+
+
 @njit(cache=True)
 def trace_river_dijkstra(start_x, start_y, height_map, sea_mask):
     """
@@ -268,3 +271,148 @@ def astar(start, goal, cost_map, height_map=None, cell_size=1.0, max_altitude=1.
         y, x = int(py), int(px)
     path.reverse()
     return path, float(cost_map[gy, gx])
+
+import numpy as np
+from numba import njit
+
+@njit
+def _heap_push(costs, xs, ys, size, c, x, y):
+    i = size
+    costs[i] = c
+    xs[i] = x
+    ys[i] = y
+    size += 1
+
+    # up-heap
+    while i > 0:
+        p = (i - 1) // 2
+        if costs[p] <= costs[i]:
+            break
+        # swap
+        costs[p], costs[i] = costs[i], costs[p]
+        xs[p], xs[i] = xs[i], xs[p]
+        ys[p], ys[i] = ys[i], ys[p]
+        i = p
+
+    return size
+
+
+@njit
+def _heap_pop(costs, xs, ys, size):
+    c = costs[0]
+    x = xs[0]
+    y = ys[0]
+
+    size -= 1
+    costs[0] = costs[size]
+    xs[0] = xs[size]
+    ys[0] = ys[size]
+
+    i = 0
+    while True:
+        l = 2 * i + 1
+        r = l + 1
+        smallest = i
+
+        if l < size and costs[l] < costs[smallest]:
+            smallest = l
+        if r < size and costs[r] < costs[smallest]:
+            smallest = r
+
+        if smallest == i:
+            break
+
+        costs[i], costs[smallest] = costs[smallest], costs[i]
+        xs[i], xs[smallest] = xs[smallest], xs[i]
+        ys[i], ys[smallest] = ys[smallest], ys[i]
+
+        i = smallest
+
+    return c, x, y, size
+
+
+@njit(cache=True)
+def trace_river_fill(start_x, start_y, height_map, sea_mask):
+    h, w = height_map.shape
+    n = h * w
+
+    cost = np.full(n, np.float32(np.inf), dtype=np.float32)
+    parent = np.full(n, -1, dtype=np.int32)
+
+    # heap arrays: each cell can be pushed up to 8 times (one per neighbour relaxation)
+    heap_cost = np.empty(8 * n, dtype=np.float32)
+    heap_x = np.empty(8 * n, dtype=np.int32)
+    heap_y = np.empty(8 * n, dtype=np.int32)
+    heap_size = 0
+
+    start_idx = start_x * w + start_y
+
+    cost[start_idx] = np.float32(0.0)
+    heap_size = _heap_push(heap_cost, heap_x, heap_y, heap_size,
+                           np.float32(0.0), start_x, start_y)
+
+    end_idx = -1
+
+    while heap_size > 0:
+        c, x, y, heap_size = _heap_pop(heap_cost, heap_x, heap_y, heap_size)
+        idx = x * w + y
+
+        if c > cost[idx]:
+            continue
+
+        if sea_mask[x, y]:
+            end_idx = idx
+            break
+
+        for dy in range(-1, 2):
+            for dx in range(-1, 2):
+                if dx == 0 and dy == 0:
+                    continue
+
+                nx = x + dx
+                ny = y + dy
+
+                if nx < 0 or nx >= h or ny < 0 or ny >= w:
+                    continue
+
+                nidx = nx * w + ny
+                nh = height_map[nx, ny]
+
+                # cumulative uphill cost: free downhill, penalise climbing
+                # (same as trace_river_dijkstra — naturally fills basins because
+                #  all downhill neighbours are explored before any uphill step)
+                step_cost = nh - height_map[x, y]
+                if step_cost < np.float32(0.0):
+                    step_cost = np.float32(0.0)
+                new_cost = c + step_cost
+
+                if new_cost < cost[nidx]:
+                    cost[nidx] = new_cost
+                    parent[nidx] = idx
+                    heap_size = _heap_push(heap_cost, heap_x, heap_y,
+                                           heap_size, new_cost, nx, ny)
+
+    # reconstruct path
+    if end_idx == -1:
+        return np.empty((0, 2), dtype=np.int32)
+
+    # count length
+    length = 0
+    cur = end_idx
+    while cur != -1:
+        length += 1
+        cur = parent[cur]
+
+    path = np.empty((length, 2), dtype=np.int32)
+
+    cur = end_idx
+    i = length - 1
+    while cur != -1:
+        x = cur // w
+        y = cur % w
+        path[i, 0] = x
+        path[i, 1] = y
+        i -= 1
+        cur = parent[cur]
+
+    return path

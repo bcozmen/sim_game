@@ -1,9 +1,9 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.ndimage import distance_transform_edt, gaussian_filter
+from scipy.ndimage import distance_transform_edt, gaussian_filter, label
 import pickle
 
-from .gpu_helpers import binary_dilation, trace_river_dijkstra, timer, binary_erosion
+from .gpu_helpers import binary_dilation, timer, binary_erosion, trace_river_fill
 
 class MapGenerator:
     def __init__(self, size, scale = 1.0 , roughness = 0.45,
@@ -17,6 +17,12 @@ class MapGenerator:
     def generate(self):
         height_map = self.generate_height_map()
         sea_mask, height_map = self.generate_sea_mask(height_map)
+
+        island_map = self.generate_island_map(sea_mask)
+        height_map, sea_mask = self.delete_islands(height_map, sea_mask)
+        sea_mask = self.delete_sea_lakes(sea_mask)
+
+
         river_mask = self.generate_rivers(height_map, sea_mask)
         slope_map = self.generate_slope_map(height_map)
 
@@ -28,14 +34,38 @@ class MapGenerator:
         husbandry_map = self.generate_husbandry_map(height_map, humidity_map)
 
         habitability_map = self.generate_habitability_map(slope_map)
+        city_map = self.generate_city_map(height_map)
         
         
 
         info = np.array([self.cell_size, self.max_altitude, self.sea_level], dtype=np.float32)
-        maps = (height_map, sea_mask, river_mask, fertility_map, forest_map, humidity_map, slope_map, husbandry_map, habitability_map, info)
-        keys = ["height", "sea", "river", "fertility", "forest", "humidity", "slope", "husbandry", "habitability", "info"]
+        maps = (height_map, sea_mask, river_mask, fertility_map, forest_map, humidity_map, slope_map, husbandry_map, habitability_map, island_map, city_map, info)
+        keys = ["height", "sea", "river", "fertility", "forest", "humidity", "slope", "husbandry", "habitability", "island", "city", "info"]
         return keys, maps
 
+    def generate_city_map(self, height_map):
+        W,H = height_map.shape
+        #city id, owner id, building type
+        city_map = np.zeros((W, H, 3), dtype=np.int32)  # 0 means no city, positive integers are city IDs
+        return city_map
+    def delete_islands(self, height_map, sea_mask):
+        #keep only the n largest islands and convert the rest to sea
+        labeled, num_features = label(~sea_mask)
+        for i in range(1, num_features + 1):
+            mask = labeled == i
+            if np.sum(mask) < 1000:  # if the island is smaller than 500 cells, delete it
+                sea_mask[mask] = True
+                height_map[mask] = 0  # set height to 0 for deleted islands
+        return height_map, sea_mask
+
+    def delete_sea_lakes(self, sea_mask):
+        #delete small sea lakes that are completely surrounded by land
+        labeled, num_features = label(sea_mask)
+        for i in range(1, num_features + 1):
+            mask = labeled == i
+            if (np.sum(mask) < 100):  # if the lake is smaller than 100 cells, delete it
+                sea_mask[mask] = False
+        return sea_mask
 
     @timer
     def generate_height_map(self):
@@ -124,25 +154,13 @@ class MapGenerator:
     def _trace_river(self, start_x, start_y, height_map, sea_mask, river_count):
         h, w = height_map.shape
 
-        end_x, end_y, parent = trace_river_dijkstra(
+        path = trace_river_fill(
             np.int32(start_x), np.int32(start_y),
             height_map.astype(np.float32),
             sea_mask,
         )
 
-        if end_x == -1:
-            return None  # no path to sea found
-
-        # reconstruct path using the flat parent array
-        start_flat = start_x * w + start_y
-        cur_flat = int(end_x) * w + int(end_y)
-        path = []
-        while cur_flat != start_flat:
-            path.append((cur_flat // w, cur_flat % w))
-            cur_flat = int(parent[cur_flat])
-        path.append((start_x, start_y))
-
-        # build river count map (increment for each river passing through)
+        
         for x, y in path:
             river_count[x, y] += 1
 
@@ -220,3 +238,11 @@ class MapGenerator:
         habitability = 1 / np.exp(slope * 1000)  # steep slopes are much less habitable, gentle slopes are close to 1
         habitability = (habitability - habitability.min()) / (habitability.max() - habitability.min() + 1e-5)  # normalize to [0, 1]
         return habitability
+
+    def generate_island_map(self, sea_mask):
+        #islands are land cells that are completely surrounded by sea
+        labeled, num_features = label(~sea_mask)
+        
+        return labeled
+
+    

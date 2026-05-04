@@ -57,7 +57,6 @@ class WorldMap:
     
     def init(self):
         self.maps = self.generate_maps()
-        self.generate_city_map()
         self.cities = self.generate_cities()
         self.generate_road_map()
     @timer
@@ -67,12 +66,7 @@ class WorldMap:
         keys, maps = generator.generate()
         maps = self.convert_to_torch(keys, maps)
         return maps    
-    @timer
-    def generate_city_map(self):
-        W,H = self.maps["height"].shape
-        #city id, owner id, building type
-        city_map = torch.zeros((W, H, 3), dtype=torch.int32)  # 0 means no city, positive integers are city IDs
-        self.maps["city"] = city_map
+
     @timer
     def generate_cities(self):
         city_count = self.city_count
@@ -149,10 +143,15 @@ class WorldMap:
        
         overlay = self.get_overlay(color=(0.0, 0.0, 0.0))  # Semi-transparent blue for sea and river
         overlay = self._plot_sea_and_river_overlay(overlay)
+        overlay = self._plot_cities(overlay)
         
+        
+
+        for city in self.cities:
+            #scatter the city position
+            ax.scatter(city.pos[1], city.pos[0], c='white',s=25, edgecolors = 'black')
         if "road" in self.maps:
             overlay = self._plot_roads(overlay)
-        overlay = self._plot_cities(overlay)
         ax.imshow(overlay)
 
     def _plot_sea_and_river_overlay(self, overlay):
@@ -166,20 +165,38 @@ class WorldMap:
         sea_mask = np.logical_or(sea, river)
         overlay = self.mask_overlay(overlay, sea_mask, color=(0.0, 0.5, 1.0), alpha=0.9)  # Semi-transparent blue for sea and river
         return overlay
+
+    def _plot_rural_farmland_overlay(self, city, overlay):
+        mask = (city[:, :, 1] == 0) & (city[:, :, 2] == 0) & (city[:, :, 0] != 0)
+        overlay = self.mask_overlay(overlay, mask, color=(1.0, 1.0, 0.0), alpha=1.0)   # Yellow for rural farmland
+        return overlay
+         
+    
+    def _plot_rural_forest_overlay(self, city, overlay):
+        mask = (city[:, :, 1] == 0) & (city[:, :, 2] == 1) & (city[:, :, 0] != 0)
+        overlay = self.mask_overlay(overlay, mask, color=(0.0, 0.5, 0.0), alpha=1.0)   # Dark Green for rural forest
+        return overlay
+
+    def _plot_urban_overlay(self, city, overlay):
+        mask = (city[:, :, 1] == 1) & (city[:, :, 0] != 0)
+        overlay = self.mask_overlay(overlay, mask, color=(1.0, 0.0, 0.0), alpha=1.0)   # Red for urban areas
+        return overlay
+
     def _plot_cities(self, overlay):
         H, W = self.maps["height"].shape
-        for city in self.cities:
-            #overlay yellow for rural
+        
             
-            city_mask = (self.maps["city"][:, :, 0] == city.id)
-            overlay = self.mask_overlay(overlay, city_mask, color=(1.0, 1.0, 0.0), alpha=0.5)  # Semi-transparent yellow for cities
+        city = self.maps["city"].cpu().numpy()
+        overlay = self._plot_rural_farmland_overlay(city, overlay)
+        overlay = self._plot_rural_forest_overlay(city, overlay)
+        overlay = self._plot_urban_overlay(city, overlay)
         return overlay
 
 
     def _plot_roads(self, overlay):
         road_mask = self.maps["road"].cpu().numpy()
         H, W = road_mask.shape
-        overlay = self.mask_overlay(overlay, road_mask, color=(0.5, 0.5, 0.5), alpha=1.0)  # Grey color for roads
+        overlay = self.mask_overlay(overlay, road_mask, color=(0, 0, 0), alpha=1.0)  # Grey color for roads
         return overlay
     
     def get_overlay(self, color = (1.0, 1.0, 0.0)):
@@ -220,3 +237,4 @@ class WorldMap:
                 city.max_radius = self.city_params.get("max_radius", city.max_radius)
                 city.growth_factor = self.city_params.get("growth_factor", city.growth_factor)
                 city.max_road_radius = self.city_params.get("max_road_radius", getattr(city, "max_road_radius", 50))
+                city.island_id = self.city_params.get("island_id", getattr(city, "island_id", None))
