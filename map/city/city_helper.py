@@ -1,5 +1,43 @@
 import numpy as np
 import matplotlib.pyplot as plt
+from scipy.ndimage import label
+
+
+
+def choose_from_pdf(pdf, top_k=100):
+    flat = pdf.flatten()
+    valid_indices = np.where(flat != 0)[0]
+
+    if len(valid_indices) == 0:
+        raise ValueError("PDF has no valid entries to sample from.")
+
+    top_k = min(top_k, len(valid_indices))
+    top_indices = valid_indices[np.argsort(flat[valid_indices])[-top_k:]]
+    top_probs = flat[top_indices]
+    top_probs /= top_probs.sum()  # Normalize
+
+    chosen_flat_index = np.random.choice(top_indices, p=top_probs)
+    return np.unravel_index(chosen_flat_index, pdf.shape)
+
+def remove_small_islands(mask, min_size):
+    mask = mask.astype(bool)
+
+    # Explicit 4-connectivity
+    structure = np.array([[0,1,0],
+                          [1,1,1],
+                          [0,1,0]])
+
+    labeled, _ = label(mask, structure=structure)
+
+    counts = np.bincount(labeled.ravel())
+
+    remove = counts < min_size
+    remove[0] = False
+
+    cleaned = ~remove[labeled]
+    cleaned[labeled == 0] = False
+
+    return cleaned
 
 def get_box_indices(array, radius):
     #get a box around true values in the array with a margin of radius
@@ -80,11 +118,11 @@ def circle_mask(shape, center, radius):
     yy, xx = np.ogrid[:shape[0], :shape[1]]
     return (yy - y) ** 2 + (xx - x) ** 2 <= radius ** 2
 
-def build_city_exclusion_mask(city_map, radius):
-    """Dilate each existing city position by max_radius * 4."""
+def build_city_exclusion_mask(city_map, radius, factor=4):
+    """Dilate each existing city position by max_radius * factor."""
     mask = city_map > 0
     for y, x in np.argwhere(mask):
-        mask |= _circle_mask(city_map.shape, (y, x), radius * 4)
+        mask |= circle_mask(city_map.shape, (y, x), radius * factor)
     return mask
 
 def get_box_indices_smart(mask, growth_mask, radius):
@@ -120,59 +158,3 @@ def get_box_indices_smart(mask, growth_mask, radius):
 
     return (min_y, max_y, min_x, max_x)
 
-def get_box_indices_smart_old(mask, growth_mask, radius):
-    indices = np.argwhere(mask)
-    if len(indices) == 0:
-        return (0, mask.shape[0], 0, mask.shape[1])
-
-    H, W = mask.shape
-
-    min_y, min_x = indices.min(axis=0)
-    max_y, max_x = indices.max(axis=0)
-
-    # initial expansion
-    min_y = max(0, min_y - radius)
-    max_y = min(H, max_y + radius)
-    min_x = max(0, min_x - radius)
-    max_x = min(W, max_x + radius)
-
-    h = max_y - min_y
-    w = max_x - min_x
-
-    # --- shift right (remove empty left) ---
-    shift = 0
-    while min_x + shift + 1 < W:
-        if np.any(growth_mask[min_y:max_y, min_x + shift]):
-            break
-        shift += 1
-    min_x += shift
-    max_x += shift
-
-    # --- shift left (remove empty right) ---
-    shift = 0
-    while max_x - shift - 1 > 0:
-        if np.any(growth_mask[min_y:max_y, max_x - shift - 1]):
-            break
-        shift += 1
-    min_x -= shift
-    max_x -= shift
-
-    # --- shift down (remove empty top) ---
-    shift = 0
-    while min_y + shift + 1 < H:
-        if np.any(growth_mask[min_y + shift, min_x:max_x]):
-            break
-        shift += 1
-    min_y += shift
-    max_y += shift
-
-    # --- shift up (remove empty bottom) ---
-    shift = 0
-    while max_y - shift - 1 > 0:
-        if np.any(growth_mask[max_y - shift - 1, min_x:max_x]):
-            break
-        shift += 1
-    min_y -= shift
-    max_y -= shift
-
-    return (min_y, max_y, min_x, max_x)

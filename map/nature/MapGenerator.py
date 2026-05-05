@@ -3,8 +3,8 @@ import matplotlib.pyplot as plt
 from scipy.ndimage import distance_transform_edt, gaussian_filter, label
 import pickle
 
-from ..functions.gpu import binary_dilation, timer, binary_erosion
-from ..path.path_finding import dijkstra, reconstruct_path
+from ..functions.gpu import binary_dilation, binary_erosion
+from ..functions.path_finding import dijkstra, reconstruct_path
 
 class MapGenerator:
     def __init__(self, size, scale = 1.0 , roughness = 0.45,
@@ -102,7 +102,6 @@ class MapGenerator:
         
         return slope_map
 
-    @timer
     def generate_height_map(self):
         assert (self.size - 1) & (self.size - 2) == 0, "size must be 2^n + 1"
 
@@ -167,9 +166,6 @@ class MapGenerator:
         self.sea_level = 0  # store for later use in fertility and forest maps
         return sea_mask, height_map
     
-    
-        
-    @timer
     def generate_rivers(self, height_map, sea_mask, directional_slope_map):
         sources = self._get_river_sources(height_map, ~sea_mask)
 
@@ -191,7 +187,6 @@ class MapGenerator:
     def _trace_river(self, start_x, start_y, height_map, sea_mask, river_count, cost_map ):
         h, w = height_map.shape
         parent, dist, path = dijkstra(cost_map, [(start_x, start_y)], sea_mask)
-        
         for x, y in path:
             river_count[x, y] += 1
         

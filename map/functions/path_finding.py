@@ -23,7 +23,7 @@ def reconstruct_path(parent, goal_flat):
     return path
 
 
-def dijkstra(cost_map, starts, goals=None):
+def dijkstra(cost_map, starts, goals=None, max_amount=None, max_cost=None):
     """
     Multi-source / multi-goal Dijkstra.
 
@@ -36,7 +36,7 @@ def dijkstra(cost_map, starts, goals=None):
     starts_arr = _points_to_array(starts, W)
     goals_arr = _points_to_array(goals, W) if goals is not None else np.empty((0, 3), dtype=np.int32)
     
-    parent, dist = _pathfind(cost_map, starts_arr, goals_arr, False)
+    parent, dist = _pathfind(cost_map, starts_arr, goals_arr, False, max_amount = max_amount, max_cost = max_cost)
     dist[dist >= 1e18] = np.inf  # convert INF to np.inf for better readability
 
     is_single_source = starts_arr.shape[0] == 1
@@ -92,7 +92,7 @@ def astar(cost_map, starts, goals):
 # ---------------------------------------------------------------------------
 
 @njit
-def _pathfind(cost_map, starts, goals, use_astar):
+def _pathfind(cost_map, starts, goals, use_astar, max_amount=None, max_cost=None):
     # cost_map: (H, W, 4) with [north, south, west, east] costs
     H = cost_map.shape[0]
     W = cost_map.shape[1]
@@ -103,6 +103,13 @@ def _pathfind(cost_map, starts, goals, use_astar):
     parent = np.full(N, -1, dtype=np.int64)
     heap = MinHeap(N)
 
+    visited = 0
+
+    # Build O(1) goal lookup to avoid O(goals) scan on every pop
+    is_goal = np.zeros(N, dtype=np.bool_)
+    for i in range(goals.shape[0]):
+        is_goal[goals[i, 2]] = True
+
     # ---- init sources ----
     for i in range(starts.shape[0]):
         s = starts[i, 2]
@@ -112,8 +119,18 @@ def _pathfind(cost_map, starts, goals, use_astar):
 
     # ---- main loop ----
     while heap.size > 0:
+        if max_amount is not None and visited >= max_amount:
+            break
+
         u, fu = heap.pop()
 
+        if max_cost is not None and g[u] > max_cost:
+            break
+        if goals.shape[0] > 0:
+            if is_goal[u]:
+                return parent, g
+        
+        visited += 1
         f_u = g[u] + (_h(u, goals, W) if use_astar else 0.0)
         if fu > f_u:
             continue
