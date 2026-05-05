@@ -2,7 +2,7 @@ import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from ..functions.gpu import binary_dilation
 from ..functions.path_finding import dijkstra, astar
-from .city_helper import *
+from .helper import *
 
 from ..functions.helper import timer
 growth_factor = {
@@ -109,7 +109,7 @@ class City:
     
     @timer
     def calculate_distance(self, cut_maps):
-        cost_map = self.get_cost_map(cut_maps, alpha=5, multiplicative=False)
+        cost_map = self.get_cost_map(cut_maps)
         _, dist, _ = dijkstra(cost_map, cut_maps["urban_mask"], goals=None, max_cost = min(150,self.max_radius))
         return normalize_inverted(dist)
     
@@ -127,6 +127,8 @@ class City:
     def choose_growth_cells(self, maps, growth_score, growth_mask, amount, land_type=0):
         # Remove places we cannot grow into because there isn't enought space
         growth_mask = remove_small_islands(growth_mask, min_size=amount)
+        if (growth_mask.sum() == 0):
+            return False, False
         # Chose cells to grow into based on the growth score and the growth mask
         chosen_cells, growth_mask = self.grow_into(maps, growth_score, amount, growth_mask, land_type=land_type)
         if len(chosen_cells) == 0:
@@ -166,8 +168,7 @@ class City:
     # ------------------------------------------------------------------ #
     @timer
     def construct_roads(self, maps, cell):
-        slope = maps["directional_slope"]
-        cost_map = 1 + slope ** 2 + np.random.rand(*slope.shape) * 0.1
+        cost_map = self.get_cost_map(maps)
         _, _, path = dijkstra(cost_map, cell, maps["road"])
 
         if path is None or len(path) < self.max_road_radius:
@@ -191,12 +192,7 @@ class City:
         distances = 1 - (distances - distances.min()) / (distances.max() - distances.min() + 1e-8)
         target = junctions[np.random.choice(len(junctions), p=soft_max(distances))]
 
-        road, sea, river = maps["road"], maps["sea"], maps["river"]
-        cost_map = 2 + 10 * (maps["directional_slope"] ** 2)
-        cost_map[road] *= 0.65
-        cost_map[sea] = np.inf
-        cost_map[river & ~road] *= 2
-
+        cost_map = self.get_cost_map(maps)
         _, _, path = astar(cost_map, cell, tuple(target))
         if path is None:
             return
@@ -207,12 +203,13 @@ class City:
     # ------------------------------------------------------------------ #
 
     def init_roads(self):
-        goals = self.maps["city"][:, :, 0].cpu().numpy().copy()
+        maps = self.get_maps()
+        goals = maps["city"][:, :, 0].copy()
         goals[self.pos[0], self.pos[1]] = 0  # exclude self
         starts = [self.pos]
 
         for _ in range(int(goals.sum())):
-            _, _, path = dijkstra(self.get_cost_map(self.get_maps()), starts, goals > 0)
+            _, _, path = dijkstra(self.get_cost_map(maps), starts, goals > 0)
             if path is None:
                 break
             path = np.array(path)
@@ -221,16 +218,16 @@ class City:
             goals[path[-1, 0], path[-1, 1]] = 0
 
     def init_location(self):
-        city_map = self.maps["city"][:, :, 0].cpu().numpy()
+        maps = self.get_maps()
+        city_map = maps["city"][:, :, 0]
         city_mask = build_city_exclusion_mask(city_map, self.max_radius, factor=self.city_init_factor)
 
-        river_mask = binary_dilation(self.maps["river"].cpu().numpy(), iterations=2)
-        sea_mask   = binary_dilation(self.maps["sea"].cpu().numpy(),   iterations=2)
+        river_mask = binary_dilation(maps["river"], iterations=2)
+        sea_mask   = binary_dilation(maps["sea"],   iterations=2)
         location_mask = ~(city_mask | river_mask | sea_mask)
 
-        height_mask = self.maps["height"] < 0.85
-        location_score = (self.maps["fertility"] * location_mask * height_mask).cpu().numpy()
-
+        height_mask = maps["height"] < 0.85
+        location_score = (maps["fertility"] * location_mask * height_mask)
         if np.sum(location_score) == 0:
             self.pos = None
             return None
@@ -267,46 +264,32 @@ class City:
     # ------------------------------------------------------------------ #
     #  Map helpers                                                         #
     # ------------------------------------------------------------------ #
-
-    def get_cost_map(self, maps, alpha=5, multiplicative=True, land_type=None):
+    
+    def get_cost_map(self, maps, mode = 0):
         cost_map = maps["directional_slope"].copy()
-        if multiplicative:
-            cost_map = np.exp(alpha * cost_map)
-        else:
-            cost_map = 1 + alpha * cost_map ** 2
-
-        road_factor = 0.5 if (multiplicative or land_type == 1) else 0.7
+        cost_map = slope_scaling_fn(cost_map)
         cost_map[maps["sea"]] = np.inf
-        cost_map[maps["road"]] *= road_factor
+        cost_map[maps["road"]] *= 1/5
         cost_map[maps["river"] & ~maps["road"]] *= 5
         return cost_map
 
-    def get_city_mask(self, land_type):
-        """Return a boolean numpy mask for this city's cells of the given land_type."""
-        city_cells = self.maps["city"][:, :, 0] == self.id
-        type_cells = (self.maps["city"][:, :, 1] > 0) if land_type == 1 else (self.maps["city"][:, :, 1] == 0)
-        return (city_cells & type_cells).cpu().numpy()
 
     def get_cut_maps(self):
-        urban_mask = self.get_city_mask(1)
-        rural_mask = self.get_city_mask(0)
-        #indices = get_box_indices(urban_mask, self.max_radius)
-        sea_mask = self.maps["sea"].cpu().numpy()
-        other_cities_mask = (self.maps["city"][:, :, 0] > 0) & (self.maps["city"][:, :, 0] != self.id)
-        other_cities_mask = other_cities_mask.cpu().numpy()
+        maps = self.get_maps()
+        maps["urban_mask"] = get_city_mask(maps, self.id, 1)
+        maps["rural_mask"] = get_city_mask(maps, self.id, 0)
+
+        sea_mask = maps["sea"]
+        other_cities_mask = (maps["city"][:, :, 0] > 0) & (maps["city"][:, :, 0] != self.id)
         growth_mask = ~(sea_mask | other_cities_mask)
-        indices = get_box_indices_smart(urban_mask, growth_mask, self.max_radius)
-        
-        cut_maps = {
-            key: (cut_box(self.maps[key].cpu().numpy(), indices)
-                  if self.maps[key].cpu().numpy().ndim >= 2
-                  else self.maps[key].cpu().numpy())
-            for key in self.maps
-        }
-        cut_maps["urban_mask"] = cut_box(urban_mask, indices)
-        cut_maps["rural_mask"] = cut_box(rural_mask, indices)
-        cut_maps["cut_indices"] = indices
-        return cut_maps
+        maps["cut_indices"] = get_box_indices_smart(maps["urban_mask"], growth_mask, self.max_radius)
+
+        for key in maps:
+            if isinstance(maps[key], np.ndarray) and maps[key].ndim >= 2:
+                maps[key] = cut_box(maps[key], maps["cut_indices"])
+
+        return maps
+
 
     def get_maps(self):
         return {key: self.maps[key].cpu().numpy() for key in self.maps}

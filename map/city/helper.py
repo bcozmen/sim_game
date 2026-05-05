@@ -2,7 +2,34 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.ndimage import label
 
+def get_island_mask(sea_mask, position):
+    """Return a boolean mask of the island containing position, or all False if position is in the sea."""
+    structure = np.array([[0,1,0],
+                          [1,1,1],
+                          [0,1,0]])
+    labeled, num_features = label(~sea_mask, structure=structure)
+    if num_features == 0:
+        return np.zeros_like(sea_mask, dtype=bool)
+    pos_label = labeled[position[0], position[1]]
+    if pos_label == 0:
+        return np.zeros_like(sea_mask, dtype=bool)
+    return labeled == pos_label
 
+def get_city_mask(maps, city_id, land_type):
+    """Return a boolean numpy mask for this city's cells of the given land_type."""
+    city_cells = maps["city"][:, :, 0] == city_id
+    type_cells = (maps["city"][:, :, 1] > 0) if land_type == 1 else (maps["city"][:, :, 1] == 0)
+    return (city_cells & type_cells)
+
+def slope_scaling_fn_old(x):
+        x = np.maximum(x, 0)  # Ensure non-negativity
+        return 1 + 10*x
+
+def slope_scaling_fn(x):
+        neg, pos = x < 0, x >= 0
+        x[neg] = 1 - x[neg] 
+        x[pos] = 1 + 10*x[pos]
+        return x
 
 def choose_from_pdf(pdf, top_k=100):
     flat = pdf.flatten()
@@ -103,7 +130,7 @@ def sample_index_from_pdf(pdf, percentile = 0.5):
     chosen_flat_index = np.random.choice(len(flat), p=prob)
     return np.unravel_index(chosen_flat_index, pdf.shape)
 
-def normalize_inverted(arr, inf_threshold=1e18):
+def normalize_inverted(arr, inf_threshold=1e15):
     """Normalize arr to [0,1] and invert, zeroing out inf values."""
     inf_mask = arr >= inf_threshold
     arr[inf_mask] = 0
@@ -156,5 +183,8 @@ def get_box_indices_smart(mask, growth_mask, radius):
     min_x += cols[0]
     max_x = min_x + cols[-1] + 1
 
-    return (min_y, max_y, min_x, max_x)
+    ret = (min_y, max_y, min_x, max_x)
+
+
+    return np.array(ret)
 
