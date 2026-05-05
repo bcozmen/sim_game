@@ -3,7 +3,8 @@ import matplotlib.pyplot as plt
 from scipy.ndimage import distance_transform_edt, gaussian_filter, label
 import pickle
 
-from .gpu_helpers import binary_dilation, timer, binary_erosion, trace_river_fill
+from ..functions.gpu import binary_dilation, timer, binary_erosion
+from ..path.path_finding import dijkstra, reconstruct_path
 
 class MapGenerator:
     def __init__(self, size, scale = 1.0 , roughness = 0.45,
@@ -16,6 +17,9 @@ class MapGenerator:
         self.max_altitude = max_altitude
     def generate(self):
         height_map = self.generate_height_map()
+        directional_slope_map = self.generate_directional_slope_map(height_map)
+        slope_map = self.generate_slope_map(height_map)
+
         sea_mask, height_map = self.generate_sea_mask(height_map)
 
         island_map = self.generate_island_map(sea_mask)
@@ -23,9 +27,8 @@ class MapGenerator:
         sea_mask = self.delete_sea_lakes(sea_mask)
 
 
-        river_mask = self.generate_rivers(height_map, sea_mask)
-        slope_map = self.generate_slope_map(height_map)
-
+        river_mask = self.generate_rivers(height_map, sea_mask, directional_slope_map)
+        
 
         humidity_map = self.generate_humidity_map(height_map, sea_mask, river_mask)
 
@@ -35,13 +38,25 @@ class MapGenerator:
 
         habitability_map = self.generate_habitability_map(slope_map)
         city_map = self.generate_city_map(height_map)
+        road_map, junction_map = self.generate_road_map(height_map)
         
         
 
         info = np.array([self.cell_size, self.max_altitude, self.sea_level], dtype=np.float32)
-        maps = (height_map, sea_mask, river_mask, fertility_map, forest_map, humidity_map, slope_map, husbandry_map, habitability_map, island_map, city_map, info)
-        keys = ["height", "sea", "river", "fertility", "forest", "humidity", "slope", "husbandry", "habitability", "island", "city", "info"]
+        maps = (height_map, sea_mask, river_mask, fertility_map, \
+                forest_map, humidity_map, slope_map, husbandry_map, \
+                habitability_map, island_map, city_map, directional_slope_map, \
+                road_map, junction_map, info)
+        keys = ["height", "sea", "river", "fertility", \
+                "forest", "humidity", "slope", "husbandry", \
+                    "habitability", "island", "city", "directional_slope", "road", "junction", "info"]
         return keys, maps
+
+    def generate_road_map(self, height_map):
+        W, H = height_map.shape
+        road_map = np.zeros((W, H), dtype=bool)  # 0 means no road, positive integers are road IDs
+        junction_map = np.zeros((W, H), dtype=bool)  # 0 means no junction, positive integers are junction IDs
+        return road_map, junction_map
 
     def generate_city_map(self, height_map):
         W,H = height_map.shape
@@ -66,6 +81,26 @@ class MapGenerator:
             if (np.sum(mask) < 100):  # if the lake is smaller than 100 cells, delete it
                 sea_mask[mask] = False
         return sea_mask
+
+
+    def generate_directional_slope_map(self, height_map):
+        H, W = height_map.shape
+        slope = np.zeros((H, W, 4), dtype=np.float32)
+
+        # north
+        slope[1:, :, 0] = height_map[:-1, :] - height_map[1:, :]
+        # south
+        slope[:-1, :, 1] = height_map[1:, :] - height_map[:-1, :]
+        # west
+        slope[:, 1:, 2] = height_map[:, :-1] - height_map[:, 1:]
+        # east
+        slope[:, :-1, 3] = height_map[:, 1:] - height_map[:, :-1]
+        slope_map = slope
+
+        slope_map = (slope_map * self.max_altitude) / self.cell_size  # scale to real-world units
+        slope_map = slope_map / (np.max(np.abs(slope_map)))  # normalize to [-1, 1]
+        
+        return slope_map
 
     @timer
     def generate_height_map(self):
@@ -135,35 +170,31 @@ class MapGenerator:
     
         
     @timer
-    def generate_rivers(self, height_map, sea_mask):
+    def generate_rivers(self, height_map, sea_mask, directional_slope_map):
         sources = self._get_river_sources(height_map, ~sea_mask)
 
         river_count = np.zeros_like(height_map, dtype=np.int32)
         hf = height_map.astype(np.float32)
-
-
+        
+        
+        cost_map = 100*np.exp(10 * directional_slope_map)  # prefer paths that go downhill, but allow uphill if necessary
+        
         for s in sources:
-            result = self._trace_river(s[0], s[1], height_map, sea_mask, river_count)
+            result = self._trace_river(s[0], s[1], height_map, sea_mask, river_count, cost_map)
             if result is not None:
                 river_count = result
 
         river_mask = self._dilate_rivers(river_count)
-        river_mask = binary_dilation(river_mask, iterations=2)  # make rivers wider for better visibility and fertility effect
+        #river_mask = binary_dilation(river_mask, iterations=2)  # make rivers wider for better visibility and fertility effect
         return river_mask
         
-    def _trace_river(self, start_x, start_y, height_map, sea_mask, river_count):
+    def _trace_river(self, start_x, start_y, height_map, sea_mask, river_count, cost_map ):
         h, w = height_map.shape
-
-        path = trace_river_fill(
-            np.int32(start_x), np.int32(start_y),
-            height_map.astype(np.float32),
-            sea_mask,
-        )
-
+        parent, dist, path = dijkstra(cost_map, [(start_x, start_y)], sea_mask)
         
         for x, y in path:
             river_count[x, y] += 1
-
+        
         return river_count
 
     def _get_river_sources(self, height_map, land_mask):

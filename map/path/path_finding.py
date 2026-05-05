@@ -39,13 +39,12 @@ def dijkstra(cost_map, starts, goals=None):
     parent, dist = _pathfind(cost_map, starts_arr, goals_arr, False)
     dist[dist >= 1e18] = np.inf  # convert INF to np.inf for better readability
 
-    print("Dijkstra: starts =", starts_arr.shape, "goals =", goals_arr.shape)
     is_single_source = starts_arr.shape[0] == 1
     is_single_goal = goals_arr.shape[0] == 1
 
     path = None
     
-    if is_single_source:
+    if is_single_source and goals_arr.shape[0] > 0:
         cheapest_goal_idx = np.argmin(dist[goals_arr[:, 2]])
         cheapest_goal_flat = goals_arr[cheapest_goal_idx, 2]
         if dist[cheapest_goal_flat] < np.inf:
@@ -54,7 +53,9 @@ def dijkstra(cost_map, starts, goals=None):
             path_y = path // W
             path_x = path % W
             path = np.stack([path_y, path_x], axis=1)  # (N, 2)
+
     
+    dist = dist.reshape(cost_map.shape[0], cost_map.shape[1])  # (H, W)
     return parent, dist, path
 
 
@@ -81,7 +82,7 @@ def astar(cost_map, starts, goals):
         path_y = path // W
         path_x = path % W
         path = np.stack([path_y, path_x], axis=1)  # (N, 2)
-    
+    dist = dist.reshape(cost_map.shape[0], cost_map.shape[1])  # (H, W)
     return parent, dist, path
 
 

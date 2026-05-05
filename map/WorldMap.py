@@ -2,10 +2,9 @@ import matplotlib.pyplot as plt
 import torch
 import numpy as np
 
-from .gpu_helpers import timer, binary_dilation
-from .map_generator import MapGenerator
-from .land import City
-from .road import Road
+from .functions.gpu import timer, binary_dilation
+from .nature.MapGenerator import MapGenerator
+from .city.city import City
 
 import pickle
 
@@ -58,7 +57,7 @@ class WorldMap:
     def init(self):
         self.maps = self.generate_maps()
         self.cities = self.generate_cities()
-        self.generate_road_map()
+        #self.generate_road_map()
     @timer
     def generate_maps(self):
         params = {**self.map_generator_params}
@@ -67,8 +66,16 @@ class WorldMap:
         maps = self.convert_to_torch(keys, maps)
         return maps    
 
-    @timer
     def generate_cities(self):
+        cities = []
+        for index in range(self.city_count):
+            city = City(id = index+1, maps = self.maps, **self.city_params)
+            if city.pos is not None:
+                cities.append(city)
+        return cities
+
+    @timer
+    def generate_cities_old(self):
         city_count = self.city_count
         #find the top city with the highest fertility that is not sea or river
         fertility = self.maps["fertility"].cpu().numpy().copy()
@@ -104,12 +111,7 @@ class WorldMap:
             fertility[mask] = 0
         return cities
 
-    @timer
-    def generate_road_map(self):
-        W,H = self.maps["height"].shape
-        road_map = torch.zeros((W, H), dtype=torch.bool)  # False means no road, True means road
-        self.maps["road"] = road_map
-        self.road = Road(self.maps, self.cities)
+
     def convert_to_torch(self, keys, maps):
         #return a dict of torch tensors with keys "height", "sea", "river", "fertility", "forest", "humidity"
         return {key: torch.from_numpy(maps[i]) for i, key in enumerate(keys)}
@@ -165,21 +167,31 @@ class WorldMap:
         sea_mask = np.logical_or(sea, river)
         overlay = self.mask_overlay(overlay, sea_mask, color=(0.0, 0.5, 1.0), alpha=0.9)  # Semi-transparent blue for sea and river
         return overlay
-
+    def _dark_border(self, overlay, mask, border_color=(0.0, 0.0, 0.0), alpha=1.0):
+        dilated = binary_dilation(mask, iterations=1)
+        border_mask = dilated & ~mask
+        overlay = self.mask_overlay(overlay, border_mask, color=border_color, alpha=alpha)
+        return overlay
     def _plot_rural_farmland_overlay(self, city, overlay):
         mask = (city[:, :, 1] == 0) & (city[:, :, 2] == 0) & (city[:, :, 0] != 0)
-        overlay = self.mask_overlay(overlay, mask, color=(1.0, 1.0, 0.0), alpha=1.0)   # Yellow for rural farmland
+        overlay = self.mask_overlay(overlay, mask, color=(1.0, 1.0, 0.0), alpha=0.7)   # Yellow for rural farmland
+        #make borders darker
+        overlay = self._dark_border(overlay, mask, border_color=(0.5, 0.5, 0.0))  # Darker yellow for borders
         return overlay
          
     
     def _plot_rural_forest_overlay(self, city, overlay):
         mask = (city[:, :, 1] == 0) & (city[:, :, 2] == 1) & (city[:, :, 0] != 0)
-        overlay = self.mask_overlay(overlay, mask, color=(0.0, 0.5, 0.0), alpha=1.0)   # Dark Green for rural forest
+        overlay = self.mask_overlay(overlay, mask, color=(0.0, 0.5, 0.0), alpha=0.7)   # Dark Green for rural forest
+        #make borders darker
+        overlay = self._dark_border(overlay, mask, border_color=(0.0, 0.25, 0.0))  # Darker green for borders
         return overlay
 
     def _plot_urban_overlay(self, city, overlay):
         mask = (city[:, :, 1] == 1) & (city[:, :, 0] != 0)
-        overlay = self.mask_overlay(overlay, mask, color=(1.0, 0.0, 0.0), alpha=1.0)   # Red for urban areas
+        overlay = self.mask_overlay(overlay, mask, color=(1.0, 0.0, 0.0), alpha=0.7)   # Red for urban areas
+        #make borders darker
+        overlay = self._dark_border(overlay, mask, border_color=(0.5, 0.0, 0.0))  # Darker red for borders
         return overlay
 
     def _plot_cities(self, overlay):
@@ -221,7 +233,6 @@ class WorldMap:
             pickle.dump({
                 "maps": self.maps,
                 "cities": self.cities,
-                "road": self.road,
             }, f)
     
     def load(self, filename = "maps.pickle"):
@@ -229,12 +240,10 @@ class WorldMap:
             data = pickle.load(f)
             self.maps = data["maps"]
             self.cities = data["cities"]
-            self.road = data.get("road", None)
             # Reassign each city's maps reference to the shared maps dict,
             # since pickle restores them as independent copies.
             for city in self.cities:
                 city.maps = self.maps
-                city.max_radius = self.city_params.get("max_radius", city.max_radius)
-                city.growth_factor = self.city_params.get("growth_factor", city.growth_factor)
-                city.max_road_radius = self.city_params.get("max_road_radius", getattr(city, "max_road_radius", 50))
-                city.island_id = self.city_params.get("island_id", getattr(city, "island_id", None))
+                city.growth_factor = self.city_params["growth_factor"]
+                city.max_radius = self.city_params["max_radius"]
+                city.max_road_radius = self.city_params["max_road_radius"]
