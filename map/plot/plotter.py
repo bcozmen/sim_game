@@ -10,6 +10,7 @@ colors = {
     "forest": (0.0, 0.5, 0.0, 0.7),  # Dark Green for rural forest
     "urban": (1.0, 0.0, 0.0, 0.7),  # Red for urban areas
     "road": (0.0, 0.0, 0.0, 1.0),  # Grey color for roads
+    "edge": (0.5, 0.5, 0.5, 1.0),  # Grey color for city edges
 }
 
 type_to_cmap = {
@@ -89,6 +90,8 @@ class Plotter:
 
         overlay = self.plot_roads(overlay)
         ax.imshow(overlay)
+        if map_type == "height":
+            self.plot_forest(ax)
 
     def plot_sea_and_river_overlay(self, overlay):
         sea_mask = self.sea_mask
@@ -100,8 +103,18 @@ class Plotter:
         overlay = plot_rural_farmland_overlay(city, overlay, color=self.colors["fertility"])
         overlay = plot_rural_forest_overlay(city, overlay, color=self.colors["forest"])
         overlay = plot_urban_overlay(city, overlay, color=self.colors["urban"])
+        #overlay = plot_city_edges_overlay(city, overlay, color=self.colors["edge"])
         return overlay
+    def plot_forest(self, ax):
+        forest = self.maps["forest"].cpu().numpy().copy()
 
+        city_mask = self.maps["city"].cpu().numpy()[:, :, 0] != 0
+        sea_mask = self.maps["sea"].cpu().numpy()
+        river_mask = self.maps["river"].cpu().numpy()
+        road_mask = self.maps["road"].cpu().numpy()
+        mask = city_mask | sea_mask | river_mask | road_mask
+        forest[mask] = 0  # Remove forest where cities, rivers, seas, or roads are present
+        ax.imshow(forest, cmap="Greens", alpha=1.0 * forest)  # Green color for forest with alpha based on density
     def plot_roads(self, overlay):
         road_mask = self.maps["road"].cpu().numpy()
         H, W = road_mask.shape

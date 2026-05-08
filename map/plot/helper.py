@@ -1,5 +1,5 @@
 import numpy as np
-from ..functions.gpu import binary_dilation
+from ..functions.gpu import binary_erosion
 
 def get_overlay(shape, color = (1.0, 1.0, 0.0)):
     H, W = shape
@@ -17,8 +17,7 @@ def mask_overlay(overlay, mask, color = (1.0, 1.0, 0.0), alpha = 1.0):
     return overlay
 
 def darken_border(overlay, mask, old_color=(0.0, 0.0, 0.0), alpha=1.0):
-    dilated = binary_dilation(mask, iterations=1)
-    border_mask = dilated & ~mask
+    border_mask = mask & ~binary_erosion(mask, iterations=1)
     #darken color by 50%
     darkened_color = tuple([c * 0.5 for c in old_color])
     overlay = mask_overlay(overlay, border_mask, color=darkened_color, alpha=alpha)
@@ -39,6 +38,10 @@ def plot_urban_overlay(city, overlay, color):
     overlay = mask_overlay(overlay, mask, color=color[:3], alpha=color[3])   # Red for urban areas
     return darken_border(overlay, mask, old_color=color[:3])  # Darker red for borders
 
+def plot_city_edges_overlay(city, overlay, color):
+    edge_mask = city[:, :, 3] == 1
+    overlay = mask_overlay(overlay, edge_mask, color=color[:3], alpha=color[3])   # Grey for city edges
+    return overlay
 def get_sea_and_river_mask(maps):
         sea = maps["sea"].cpu().numpy()
         river = maps["river"].cpu().numpy()

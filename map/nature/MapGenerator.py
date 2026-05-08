@@ -6,6 +6,24 @@ import pickle
 from ..functions.gpu import binary_dilation, binary_erosion
 from ..functions.path_finding import dijkstra, reconstruct_path
 
+max_slopes = {
+    "farmland": 0.21,
+    "pasture" : 0.35,
+    "forest" : 0.45
+}
+
+slope_scale = {
+    "max" : (0,0.1),
+    "high" : (0.1, 0.21),
+    "moderate" : (0.21, 0.35),
+    "low" : (0.35, 0.45),
+}
+
+
+
+
+
+
 class MapGenerator:
     def __init__(self, size, scale = 1.0 , roughness = 0.45,
                  river_count = 8, cell_size = 10, max_altitude = 1000):
@@ -30,7 +48,7 @@ class MapGenerator:
         river_mask = self.generate_rivers(height_map, sea_mask, directional_slope_map)
         
 
-        humidity_map = self.generate_humidity_map(height_map, sea_mask, river_mask)
+        humidity_map = self.generate_humidity_map(height_map, sea_mask, river_mask, directional_slope_map)
 
         fertility_map = self.generate_fertility_map(height_map, humidity_map, slope_map)
         forest_map = self.generate_forest_map(height_map, fertility_map, sea_mask, river_mask)
@@ -60,8 +78,8 @@ class MapGenerator:
 
     def generate_city_map(self, height_map):
         W,H = height_map.shape
-        #city id, owner id, building type
-        city_map = np.zeros((W, H, 3), dtype=np.int32)  # 0 means no city, positive integers are city IDs
+        #city id, owner id, building type, edge_map
+        city_map = np.zeros((W, H, 4), dtype=np.int32)  # 0 means no city, positive integers are city IDs
         return city_map
     def delete_islands(self, height_map, sea_mask):
         #keep only the n largest islands and convert the rest to sea
@@ -81,8 +99,6 @@ class MapGenerator:
             if (np.sum(mask) < 100):  # if the lake is smaller than 100 cells, delete it
                 sea_mask[mask] = False
         return sea_mask
-
-
     def generate_directional_slope_map(self, height_map):
         H, W = height_map.shape
         slope = np.zeros((H, W, 4), dtype=np.float32)
@@ -98,9 +114,9 @@ class MapGenerator:
         slope_map = slope
 
         slope_map = (slope_map * self.max_altitude) / self.cell_size  # scale to real-world units
-        slope_map = slope_map / (np.max(np.abs(slope_map)))  # normalize to [-1, 1]
-        
+        #convert to degrees
         return slope_map
+
 
     def generate_height_map(self):
         assert (self.size - 1) & (self.size - 2) == 0, "size must be 2^n + 1"
@@ -218,11 +234,22 @@ class MapGenerator:
         return dilated
 
     def generate_slope_map(self, height_map):
-        dz, dx = np.gradient(height_map)
-        slope = np.sqrt(dz**2 + dx**2)
+        dz, dx = np.gradient(height_map * self.max_altitude, self.cell_size)
+        #as degrees
+        slope = np.arctan(np.sqrt(dx**2 + dz**2))
         return slope
 
-    def generate_humidity_map(self, height_map, sea_mask, river_mask):
+    def generate_humidity_map(self, height_map, sea_mask, river_mask, directional_slope_map):
+        water_mask = sea_mask | river_mask
+        cost_map = np.maximum(0, directional_slope_map)  # prefer paths that go downhill, but allow uphill if necessary
+        cost_map[water_mask] = 0  # water cells have zero cost to reach
+        cost_map = 1 + 10 * cost_map
+
+        _, dist, _ = dijkstra(cost_map, water_mask)
+        humidity = 1 - (dist / np.max(dist))
+        humidity[water_mask] = 1  # water cells have max humidity
+        return humidity
+    def generate_humidity_map_old(self, height_map, sea_mask, river_mask):
         #humidity is higher near water and in low altitudes
         humidity = np.zeros_like(height_map, dtype=np.float32)
 
@@ -233,36 +260,31 @@ class MapGenerator:
         #normalize distance to water and invert so closer to water is higher humidity
         humidity = 1 - (water_distance / np.max(water_distance))
         humidity[water_mask] = 0  # water cells have max humidity
-        humidity = humidity ** 0.4
+        #humidity = humidity ** 0.4
         return humidity
 
     def generate_fertility_map(self, height_map, humidity_map, slope_map):
-        slope = slope_map
-        slope[slope < 0.0005] = 0 
-        slope = 1 / np.exp(slope * 100)  # steep slopes have much lower fertility, gentle slopes are close to 1
-        fertility = (humidity_map) * (1 - (height_map ** 1.5)) * slope  # combine humidity, altitude, and slope effects 
-        fertility = (fertility - fertility.min()) / (fertility.max() - fertility.min() + 1e-5)  # normalize to [0, 1]
+        slope = 1 - 1.5 *(slope_map ** 2)
+        fertility = (humidity_map) * slope  # combine humidity, altitude, and slope effects 
+        fertility = (fertility - fertility.min()) / (fertility.max() - fertility.min() )  # normalize to [0, 1]
         return fertility
 
     def generate_forest_map(self, height_map, fertility_map, sea_mask, river_mask):
-        height = np.clip(height_map - self.sea_level, 0, 1)
-        altitude_effect = np.exp(height)  # exponential boost for higher altitudes
-        normalized_altitude_effect = (altitude_effect - altitude_effect.min()) / (altitude_effect.max() - altitude_effect.min() + 1e-5)
-
-        forest_map = normalized_altitude_effect * (1 + fertility_map)
-        forest_map = (forest_map - forest_map.min()) / (forest_map.max() - forest_map.min() + 1e-5)
+        forest_map = (fertility_map) * (height_map ** 1.5)  # forests prefer fertile and high altitude areas
+        forest_map = (forest_map - forest_map.min()) / (forest_map.max() - forest_map.min() )  # normalize to [0, 1]
         return forest_map
 
     def generate_husbandry_map(self, height_map, humidity_map):
         husbandry = (humidity_map) * ((1 - height_map ) ** 0.25)  # husbandry is better in humid and low altitude areas
-        husbandry = (husbandry - husbandry.min()) / (husbandry.max() - husbandry.min() + 1e-5)
+        husbandry = (husbandry - husbandry.min()) / (husbandry.max() - husbandry.min() )
         return husbandry
     
     def generate_habitability_map(self, slope_map):
-        slope = slope_map
-        slope[slope < 0.001] = 0 
-        habitability = 1 / np.exp(slope * 1000)  # steep slopes are much less habitable, gentle slopes are close to 1
-        habitability = (habitability - habitability.min()) / (habitability.max() - habitability.min() + 1e-5)  # normalize to [0, 1]
+        #slope = slope_map
+        #slope[slope < 0.001] = 0 
+        #habitability = 1 / np.exp(slope * 1000)  # steep slopes are much less habitable, gentle slopes are close to 1
+        #habitability = (habitability - habitability.min()) / (habitability.max() - habitability.min() + 1e-5)  # normalize to [0, 1]
+        habitability = 1 - (slope_map / np.max(slope_map))  # simple inverse of slope, normalized to [0, 1]
         return habitability
 
     def generate_island_map(self, sea_mask):

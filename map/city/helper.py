@@ -2,6 +2,18 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.ndimage import label
 
+def get_edge_mask(mask):
+    """Return a boolean mask of the edges of the True regions in mask."""
+    structure = np.array([[0,1,0],
+                          [1,1,1],
+                          [0,1,0]])
+    labeled, num_features = label(mask, structure=structure)
+    edge_mask = np.zeros_like(mask, dtype=bool)
+    for i in range(1, num_features + 1):
+        component = (labeled == i)
+        edge_mask |= (component & ~np.pad(component[1:-1, 1:-1], ((1, 1), (1, 1)), mode='constant', constant_values=False))
+    return edge_mask
+
 def get_island_mask(sea_mask, position):
     """Return a boolean mask of the island containing position, or all False if position is in the sea."""
     structure = np.array([[0,1,0],
@@ -21,15 +33,12 @@ def get_city_mask(maps, city_id, land_type):
     type_cells = (maps["city"][:, :, 1] > 0) if land_type == 1 else (maps["city"][:, :, 1] == 0)
     return (city_cells & type_cells)
 
-def slope_scaling_fn_old(x):
-        x = np.maximum(x, 0)  # Ensure non-negativity
-        return 1 + 10*x
 
 def slope_scaling_fn(x):
         neg, pos = x < 0, x >= 0
-        x[neg] = 1 - x[neg] 
-        x[pos] = 1 + 10*x[pos]
-        return x
+        x = 3 * (np.exp(2 * np.abs(x))-1)
+        x[pos] *= 3
+        return 1 + x
 
 def choose_from_pdf(pdf, top_k=100):
     flat = pdf.flatten()
@@ -47,22 +56,23 @@ def choose_from_pdf(pdf, top_k=100):
     return np.unravel_index(chosen_flat_index, pdf.shape)
 
 def remove_small_islands(mask, min_size):
-    mask = mask.astype(bool)
+    mask = np.asarray(mask, dtype=bool)
 
-    # Explicit 4-connectivity
-    structure = np.array([[0,1,0],
-                          [1,1,1],
-                          [0,1,0]])
+    # Label connected components
+    labeled, num_features = label(mask)
 
-    labeled, _ = label(mask, structure=structure)
+    if num_features == 0:
+        return mask
 
-    counts = np.bincount(labeled.ravel())
+    # Count sizes of each component (label 0 is background)
+    sizes = np.bincount(labeled.ravel())
 
-    remove = counts < min_size
-    remove[0] = False
+    # Create mask of labels to keep
+    keep_labels = sizes >= min_size
+    keep_labels[0] = False  # always remove background
 
-    cleaned = ~remove[labeled]
-    cleaned[labeled == 0] = False
+    # Map back to original shape
+    cleaned = keep_labels[labeled]
 
     return cleaned
 

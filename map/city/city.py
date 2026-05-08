@@ -1,6 +1,7 @@
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from ..functions.gpu import binary_dilation
+
+from ..functions.gpu import binary_dilation, binary_erosion
 from ..functions.path_finding import dijkstra, astar
 from .helper import *
 
@@ -27,6 +28,7 @@ preference_types = {
     "forest": 1,
 }
 
+
 class City:
     def __init__(self, id=1, maps=None, 
                 max_radius=150, max_road_radius=10, city_init_factor = 4,growth_factor=growth_factor):
@@ -41,6 +43,7 @@ class City:
         self.pos = self.init_location()
         if self.pos is not None:
             self.init_roads()
+            self.island_mask = get_island_mask(self.maps["sea"], self.pos)
 
     # ------------------------------------------------------------------ #
     #  Growth                                                              #
@@ -116,9 +119,9 @@ class City:
     def get_growth_mask(self, cut_maps, land_type=0):
         water_mask = cut_maps["sea"] | cut_maps["river"]
         other_city_mask = (cut_maps["city"][:, :, 0] > 0) & (cut_maps["city"][:, :, 0] != self.id)
-        growth_mask = ~(water_mask | other_city_mask | cut_maps["urban_mask"])
+        growth_mask = ~(water_mask | other_city_mask | cut_maps["urban_mask"] | ~cut_maps["this_island"])
         if land_type == 0:
-            growth_mask &= ~cut_maps["rural_mask"]
+            growth_mask &= ~cut_maps["rural_mask"] & ~cut_maps["road"]
         elif land_type == 1:
             growth_mask &= ~cut_maps["road"]
         return growth_mask
@@ -142,8 +145,8 @@ class City:
     def grow_into(self, maps, growth_score, amount, growth_mask, land_type=0):
         probs = soft_max(growth_score)
         probs[~growth_mask] = 0
-        index = choose_from_pdf(probs)
-        #index = np.unravel_index(np.argmax(probs), probs.shape)
+        #index = choose_from_pdf(probs)
+        index = np.unravel_index(np.argmax(probs), probs.shape)
 
         coef = 1 if land_type == 1 else 5
         cost_map = 1 + coef * (maps["directional_slope"] ** 2)
@@ -154,10 +157,11 @@ class City:
             cost_map[roads] = np.inf
         elif land_type == 0:
             roads = maps["road"]
-            cost_map[roads] *= 2.0
+            cost_map[roads] = np.inf
         
         _, dist, _ = dijkstra(cost_map, index, goals=None, max_amount=amount*4)
         dist[~growth_mask] = np.inf
+        
 
         chosen_indices = choose_indices(dist, amount, minimize=True)
         growth_mask[chosen_indices[:, 0], chosen_indices[:, 1]] = False
@@ -166,8 +170,23 @@ class City:
     # ------------------------------------------------------------------ #
     #  Road construction                                                   #
     # ------------------------------------------------------------------ #
+
     @timer
-    def construct_roads(self, maps, cell):
+    def construct_roads(self, maps, edge_mask):
+        cost_map = self.get_cost_map(maps)
+        _, _, path = dijkstra(cost_map, edge_mask, maps["junction"])
+
+        if path is None:
+            return
+
+        path = np.array(path)
+        self.register_road(convert_local_to_global(path, maps["cut_indices"]))
+
+        #register starting cell as junction
+        self.register_junction(convert_local_to_global(path[0], maps["cut_indices"]).reshape(-1, 2))
+        self.add_random_road(maps, path[0])
+    @timer
+    def construct_roads_old(self, maps, cell):
         cost_map = self.get_cost_map(maps)
         _, _, path = dijkstra(cost_map, cell, maps["road"])
 
@@ -207,6 +226,7 @@ class City:
         goals = maps["city"][:, :, 0].copy()
         goals[self.pos[0], self.pos[1]] = 0  # exclude self
         starts = [self.pos]
+        self.register_junction(np.array(starts), cut=False)
 
         for _ in range(int(goals.sum())):
             _, _, path = dijkstra(self.get_cost_map(maps), starts, goals > 0)
@@ -214,7 +234,8 @@ class City:
                 break
             path = np.array(path)
             self.register_road(path)
-            self.register_junction(path, cut=True)
+           
+            #self.register_junction(path, cut=True)
             goals[path[-1, 0], path[-1, 1]] = 0
 
     def init_location(self):
@@ -244,9 +265,13 @@ class City:
 
     def register(self, pos_array, land_type=0, preference="fertility"):
         pos_array = np.asarray(pos_array)
+        pos_mask = np.zeros_like(self.maps["city"][:, :, 0], dtype=bool)
+        pos_mask[pos_array[:, 0], pos_array[:, 1]] = True
+        edge_mask = pos_mask & ~binary_erosion(pos_mask, iterations=1)
         self.maps["city"][pos_array[:, 0], pos_array[:, 1], 0] = self.id
         self.maps["city"][pos_array[:, 0], pos_array[:, 1], 1] = land_type
         self.maps["city"][pos_array[:, 0], pos_array[:, 1], 2] = preference_types[preference]
+        self.maps["city"][edge_mask, 3] = 1  # Mark edges in the fourth channel
 
     def register_road(self, pos_array):
         pos_array = np.asarray(pos_array)
@@ -270,14 +295,22 @@ class City:
         cost_map = slope_scaling_fn(cost_map)
         cost_map[maps["sea"]] = np.inf
         cost_map[maps["road"]] *= 1/5
+        cost_map[maps["junction"]] *= 1/5
         cost_map[maps["river"] & ~maps["road"]] *= 5
+        forests = maps["forest"] > 0.5
+        cost_map[forests] *= 2
+        
+        #urban areas are np.if except the edges
+        
+        city_mask = maps["city"][:, :, 0] == self.id
+        edge_mask = maps["city"][:, :, 3] > 0
+        cost_map[city_mask & ~edge_mask] = np.inf
         return cost_map
 
 
     def get_cut_maps(self):
         maps = self.get_maps()
-        maps["urban_mask"] = get_city_mask(maps, self.id, 1)
-        maps["rural_mask"] = get_city_mask(maps, self.id, 0)
+        maps["this_island"] = self.island_mask.copy()
 
         sea_mask = maps["sea"]
         other_cities_mask = (maps["city"][:, :, 0] > 0) & (maps["city"][:, :, 0] != self.id)
@@ -292,7 +325,10 @@ class City:
 
 
     def get_maps(self):
-        return {key: self.maps[key].cpu().numpy() for key in self.maps}
+        new_maps = {key: self.maps[key].cpu().numpy() for key in self.maps}
+        new_maps["urban_mask"] = get_city_mask(new_maps, self.id, 1)
+        new_maps["rural_mask"] = get_city_mask(new_maps, self.id, 0)
+        return new_maps
 
 
 

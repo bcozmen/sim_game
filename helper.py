@@ -7,7 +7,7 @@ index_to_preference = {
 }
 
 preference_p = np.asarray([0.75, 0.25])
-land_type_p = np.asarray([0.5, 0.5])
+land_type_p = np.asarray([0.25, 0.75])
 
 
 
